@@ -30,16 +30,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import numpy as np
 
-# MCP imports
-from mcp.server.fastmcp import FastMCP
-from mcp.types import (
-    Resource,
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource,
-    LoggingLevel
-)
+# FastMCP imports
+from fastmcp import FastMCP
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -597,384 +589,213 @@ class DocumentDatabase:
             logger.error(f"Error searching documents: {str(e)}")
             return []
 
-class DocumentAnalyzerMCP:
-    """Main MCP Server class"""
+# Initialize FastMCP server
+app = FastMCP("document-analyzer")
+
+# Global variables for database and analyzer
+db = None
+analyzer = None
+parser = None
+
+# Components will be initialized by the function below
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.db = DocumentDatabase(config['database_path'])
-        self.analyzer = DocumentAnalyzer(config['openai_api_key'])
-        self.parser = DocumentParser()
-        
-        # Initialize MCP server
-        self.server = Server("document-analyzer")
-        self.setup_tools()
+@app.tool()
+async def analyze_document(document_id: str) -> str:
+    """Perform comprehensive analysis of a document"""
+    # Get document from database
+    doc = db.get_document(document_id)
+    if not doc:
+        raise Exception(f"Document with ID {document_id} not found")
     
-    def setup_tools(self):
-        """Setup MCP tools"""
-        
-        @self.server.list_tools()
-        async def handle_list_tools() -> List[Tool]:
-            return [
-                Tool(
-                    name="analyze_document",
-                    description="Perform comprehensive analysis of a document",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "document_id": {
-                                "type": "string",
-                                "description": "ID of the document to analyze"
-                            }
-                        },
-                        "required": ["document_id"]
-                    }
-                ),
-                Tool(
-                    name="get_sentiment",
-                    description="Get sentiment analysis for any text",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "text": {
-                                "type": "string",
-                                "description": "Text to analyze for sentiment"
-                            }
-                        },
-                        "required": ["text"]
-                    }
-                ),
-                Tool(
-                    name="extract_keywords",
-                    description="Extract keywords from text",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "text": {
-                                "type": "string",
-                                "description": "Text to extract keywords from"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of keywords to return",
-                                "default": 10
-                            }
-                        },
-                        "required": ["text"]
-                    }
-                ),
-                Tool(
-                    name="add_document",
-                    description="Add a new document to the database with text content",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "document_data": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string", "description": "Document title"},
-                                    "content": {"type": "string", "description": "Document text content"},
-                                    "author": {"type": "string", "description": "Document author"},
-                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Document tags"},
-                                    "category": {"type": "string", "description": "Document category"}
-                                },
-                                "required": ["title", "content"]
-                            }
-                        },
-                        "required": ["document_data"]
-                    }
-                ),
-                Tool(
-                    name="add_document_from_file",
-                    description="Add a new document by uploading a file (PDF, DOCX, TXT, HTML, MD)",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Absolute path to the file to upload and analyze"
-                            },
-                            "title": {
-                                "type": "string",
-                                "description": "Optional custom title (if not provided, filename will be used)"
-                            },
-                            "author": {
-                                "type": "string",
-                                "description": "Document author"
-                            },
-                            "tags": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Document tags"
-                            },
-                            "category": {
-                                "type": "string",
-                                "description": "Document category"
-                            },
-                            "auto_analyze": {
-                                "type": "boolean",
-                                "description": "Whether to automatically analyze the document after adding",
-                                "default": false
-                            }
-                        },
-                        "required": ["file_path"]
-                    }
-                ),
-                Tool(
-                    name="search_documents",
-                    description="Search documents by content",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of results",
-                                "default": 10
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                )
-            ]
-        
-        @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-            try:
-                if name == "analyze_document":
-                    return await self.handle_analyze_document(arguments)
-                elif name == "get_sentiment":
-                    return await self.handle_get_sentiment(arguments)
-                elif name == "extract_keywords":
-                    return await self.handle_extract_keywords(arguments)
-                elif name == "add_document":
-                    return await self.handle_add_document(arguments)
-                elif name == "add_document_from_file":
-                    return await self.handle_add_document_from_file(arguments)
-                elif name == "search_documents":
-                    return await self.handle_search_documents(arguments)
-                else:
-                    raise Exception(f"Unknown tool: {name}")
-            except Exception as e:
-                logger.error(f"Error in tool {name}: {str(e)}")
-                return [TextContent(type="text", text=f"Error: {str(e)}")]
+    # Check if analysis already exists and is recent
+    existing_analysis = db.get_analysis_result(document_id)
+    if existing_analysis:
+        # Return cached result
+        return json.dumps(existing_analysis, indent=2)
     
-    async def handle_analyze_document(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle document analysis"""
-        document_id = arguments["document_id"]
-        
-        # Get document from database
-        doc = self.db.get_document(document_id)
-        if not doc:
-            raise Exception(f"Document with ID {document_id} not found")
-        
-        # Check if analysis already exists and is recent
-        existing_analysis = self.db.get_analysis_result(document_id)
-        if existing_analysis:
-            # Return cached result
-            return [TextContent(type="text", text=json.dumps(existing_analysis, indent=2))]
-        
-        # Perform analysis
-        analysis_result = await self.analyzer.analyze_document_content(doc['content'], document_id)
-        
-        # Save analysis result
-        self.db.save_analysis_result(analysis_result)
-        
-        # Return result
-        result_dict = asdict(analysis_result)
-        result_dict['analysis_timestamp'] = result_dict['analysis_timestamp'].isoformat()
-        
-        return [TextContent(type="text", text=json.dumps(result_dict, indent=2))]
+    # Perform analysis
+    analysis_result = await analyzer.analyze_document_content(doc['content'], document_id)
     
-    async def handle_get_sentiment(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle sentiment analysis"""
-        text = arguments["text"]
-        sentiment = self.analyzer.analyze_sentiment(text)
-        
-        return [TextContent(type="text", text=json.dumps(sentiment, indent=2))]
+    # Save analysis result
+    db.save_analysis_result(analysis_result)
     
-    async def handle_extract_keywords(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle keyword extraction"""
-        text = arguments["text"]
-        limit = arguments.get("limit", 10)
-        
-        keywords = self.analyzer.extract_keywords(text, limit)
-        
-        return [TextContent(type="text", text=json.dumps(keywords, indent=2))]
+    # Return result
+    result_dict = asdict(analysis_result)
+    result_dict['analysis_timestamp'] = result_dict['analysis_timestamp'].isoformat()
     
-    async def handle_add_document(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle adding a new document with text content"""
-        doc_data = arguments["document_data"]
-        
-        # Generate document ID
-        document_id = hashlib.sha256(
-            f"{doc_data['title']}{doc_data['content']}{datetime.now().isoformat()}".encode()
-        ).hexdigest()[:16]
-        
-        # Create metadata
-        metadata = DocumentMetadata(
-            title=doc_data["title"],
-            author=doc_data.get("author"),
-            tags=doc_data.get("tags", []),
-            category=doc_data.get("category"),
-            created_date=datetime.now(),
-            modified_date=datetime.now()
-        )
-        
-        # Use provided content directly
-        content = doc_data["content"]
-        
-        # Add document to database
-        success = self.db.add_document(document_id, doc_data["title"], content, metadata)
-        
-        if success:
-            return [TextContent(type="text", text=json.dumps({
-                "success": True,
-                "document_id": document_id,
-                "message": "Document added successfully",
-                "word_count": len(content.split()),
-                "char_count": len(content)
-            }, indent=2))]
-        else:
-            raise Exception("Failed to add document to database")
+    return json.dumps(result_dict, indent=2)
+
+@app.tool()
+async def get_sentiment(text: str) -> str:
+    """Get sentiment analysis for any text"""
+    sentiment = analyzer.analyze_sentiment(text)
+    return json.dumps(sentiment, indent=2)
+
+@app.tool()
+async def extract_keywords(text: str, limit: int = 10) -> str:
+    """Extract keywords from text"""
+    keywords = analyzer.extract_keywords(text, limit)
+    return json.dumps(keywords, indent=2)
     
-    async def handle_add_document_from_file(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle adding a new document from file upload"""
-        file_path = arguments["file_path"]
-        
-        # Validate file exists
-        if not os.path.exists(file_path):
-            raise Exception(f"File not found: {file_path}")
-        
-        # Get file information
-        file_path_obj = Path(file_path)
-        file_extension = file_path_obj.suffix.lower()
-        file_size = os.path.getsize(file_path)
-        
-        # Validate file type
-        supported_extensions = ['.pdf', '.docx', '.doc', '.txt', '.html', '.htm', '.md', '.markdown']
-        if file_extension not in supported_extensions:
-            raise Exception(f"Unsupported file type: {file_extension}. Supported types: {', '.join(supported_extensions)}")
-        
-        # Parse document content
-        try:
-            content = self.parser.parse_document(file_path)
-            if not content.strip():
-                raise Exception("No text content could be extracted from the file")
-        except Exception as e:
-            raise Exception(f"Error parsing file: {str(e)}")
-        
-        # Use custom title or filename
-        title = arguments.get("title", file_path_obj.stem)
-        
-        # Generate document ID
-        document_id = hashlib.sha256(
-            f"{title}{content[:1000]}{datetime.now().isoformat()}".encode()
-        ).hexdigest()[:16]
-        
-        # Create metadata
-        metadata = DocumentMetadata(
-            title=title,
-            author=arguments.get("author"),
-            tags=arguments.get("tags", []),
-            category=arguments.get("category"),
-            file_path=file_path,
-            file_type=file_extension,
-            file_size=file_size,
-            created_date=datetime.now(),
-            modified_date=datetime.now()
-        )
-        
-        # Add document to database
-        success = self.db.add_document(document_id, title, content, metadata)
-        
-        if not success:
-            raise Exception("Failed to add document to database")
-        
-        # Prepare response
-        response_data = {
+@app.tool()
+async def add_document(document_data: dict) -> str:
+    """Add a new document to the database with text content"""
+    # Generate document ID
+    document_id = hashlib.sha256(
+        f"{document_data['title']}{document_data['content']}{datetime.now().isoformat()}".encode()
+    ).hexdigest()[:16]
+    
+    # Create metadata
+    metadata = DocumentMetadata(
+        title=document_data["title"],
+        author=document_data.get("author"),
+        tags=document_data.get("tags", []),
+        category=document_data.get("category"),
+        created_date=datetime.now(),
+        modified_date=datetime.now()
+    )
+    
+    # Use provided content directly
+    content = document_data["content"]
+    
+    # Add document to database
+    success = db.add_document(document_id, document_data["title"], content, metadata)
+    
+    if success:
+        return json.dumps({
             "success": True,
             "document_id": document_id,
-            "message": "Document uploaded and added successfully",
-            "file_info": {
-                "filename": file_path_obj.name,
-                "file_type": file_extension,
-                "file_size_bytes": file_size,
-                "file_size_mb": round(file_size / (1024 * 1024), 2)
-            },
-            "content_stats": {
-                "word_count": len(content.split()),
-                "char_count": len(content),
-                "paragraph_count": len([p for p in content.split('\n\n') if p.strip()])
-            }
-        }
-        
-        # Auto-analyze if requested
-        if arguments.get("auto_analyze", False):
-            try:
-                analysis_result = await self.analyzer.analyze_document_content(content, document_id)
-                self.db.save_analysis_result(analysis_result)
-                
-                # Add analysis summary to response
-                response_data["analysis_summary"] = {
-                    "sentiment_label": analysis_result.sentiment_label,
-                    "sentiment_score": analysis_result.sentiment_score,
-                    "top_keywords": [kw["keyword"] for kw in analysis_result.keywords[:5]],
-                    "readability_grade": analysis_result.readability_scores.get("flesch_kincaid_grade", "N/A")
-                }
-                response_data["message"] += " and analyzed"
-            except Exception as e:
-                logger.warning(f"Auto-analysis failed: {str(e)}")
-                response_data["analysis_warning"] = f"Document added but analysis failed: {str(e)}"
-        
-        return [TextContent(type="text", text=json.dumps(response_data, indent=2))]
-    
-    async def handle_search_documents(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle document search"""
-        query = arguments["query"]
-        limit = arguments.get("limit", 10)
-        
-        results = self.db.search_documents(query, limit)
-        
-        return [TextContent(type="text", text=json.dumps(results, indent=2))]
+            "message": "Document added successfully",
+            "word_count": len(content.split()),
+            "char_count": len(content)
+        }, indent=2)
+    else:
+        raise Exception("Failed to add document to database")
 
-async def main():
-    """Main function to run the MCP server"""
-    # Load environment variables from .env file
+@app.tool()
+async def search_documents(query: str, limit: int = 10) -> str:
+    """Search documents by content"""
+    results = db.search_documents(query, limit)
+    return json.dumps(results, indent=2)
+    
+@app.tool()
+async def add_document_from_file(file_path: str, title: str = None, author: str = None, tags: list = None, category: str = None, auto_analyze: bool = False) -> str:
+    """Add a new document from file upload"""
+    # Validate file exists
+    if not os.path.exists(file_path):
+        raise Exception(f"File not found: {file_path}")
+    
+    # Get file information
+    file_path_obj = Path(file_path)
+    file_extension = file_path_obj.suffix.lower()
+    file_size = os.path.getsize(file_path)
+    
+    # Validate file type
+    supported_extensions = ['.pdf', '.docx', '.doc', '.txt', '.html', '.htm', '.md', '.markdown']
+    if file_extension not in supported_extensions:
+        raise Exception(f"Unsupported file type: {file_extension}. Supported types: {', '.join(supported_extensions)}")
+    
+    # Parse document content
+    try:
+        content = parser.parse_document(file_path)
+        if not content.strip():
+            raise Exception("No text content could be extracted from the file")
+    except Exception as e:
+        raise Exception(f"Error parsing file: {str(e)}")
+    
+    # Use custom title or filename
+    if not title:
+        title = file_path_obj.stem
+    
+    # Generate document ID
+    document_id = hashlib.sha256(
+        f"{title}{content[:1000]}{datetime.now().isoformat()}".encode()
+    ).hexdigest()[:16]
+    
+    # Create metadata
+    metadata = DocumentMetadata(
+        title=title,
+        author=author,
+        tags=tags or [],
+        category=category,
+        file_path=file_path,
+        file_type=file_extension,
+        file_size=file_size,
+        created_date=datetime.now(),
+        modified_date=datetime.now()
+    )
+    
+    # Add document to database
+    success = db.add_document(document_id, title, content, metadata)
+    
+    if not success:
+        raise Exception("Failed to add document to database")
+    
+    # Prepare response
+    response_data = {
+        "success": True,
+        "document_id": document_id,
+        "message": "Document uploaded and added successfully",
+        "file_info": {
+            "filename": file_path_obj.name,
+            "file_type": file_extension,
+            "file_size_bytes": file_size,
+            "file_size_mb": round(file_size / (1024 * 1024), 2)
+        },
+        "content_stats": {
+            "word_count": len(content.split()),
+            "char_count": len(content),
+            "paragraph_count": len([p for p in content.split('\n\n') if p.strip()])
+        }
+    }
+    
+    # Auto-analyze if requested
+    if auto_analyze:
+        try:
+            analysis_result = await analyzer.analyze_document_content(content, document_id)
+            db.save_analysis_result(analysis_result)
+            
+            # Add analysis summary to response
+            response_data["analysis_summary"] = {
+                "sentiment_label": analysis_result.sentiment_label,
+                "sentiment_score": analysis_result.sentiment_score,
+                "top_keywords": [kw["keyword"] for kw in analysis_result.keywords[:5]],
+                "readability_grade": analysis_result.readability_scores.get("flesch_kincaid_grade", "N/A")
+            }
+            response_data["message"] += " and analyzed"
+        except Exception as e:
+            logger.warning(f"Auto-analysis failed: {str(e)}")
+            response_data["analysis_warning"] = f"Document added but analysis failed: {str(e)}"
+    
+    return json.dumps(response_data, indent=2)
+
+def initialize_components():
+    """Initialize global components"""
+    global db, analyzer, parser
+    
+    # Load environment variables
     load_dotenv()
     
     # Configuration
-    config = {
-        "database_path": os.getenv("DOC_ANALYZER_DB_PATH", "./documents.db"),
-        "openai_api_key": os.getenv("OPENAI_API_KEY")
-    }
+    database_path = os.getenv("DOC_ANALYZER_DB_PATH", "./documents.db")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
     
-    if not config["openai_api_key"]:
+    if not openai_api_key:
         raise Exception("OPENAI_API_KEY environment variable is required")
     
-    # Create MCP server
-    mcp_server = DocumentAnalyzerMCP(config)
+    # Initialize components
+    db = DocumentDatabase(database_path)
+    analyzer = DocumentAnalyzer(openai_api_key)
+    parser = DocumentParser()
     
-    # Add sample documents
-    await add_sample_documents(mcp_server)
-    
-    # Run server
-    async with stdio_server() as (read_stream, write_stream):
-        await mcp_server.server.run(
-            read_stream, 
-            write_stream, 
-            InitializationOptions(
-                server_name="document-analyzer",
-                server_version="1.0.0",
-                capabilities={}
-            )
-        )
+    logger.info("Components initialized successfully")
 
-async def add_sample_documents(mcp_server: DocumentAnalyzerMCP):
+async def add_sample_documents():
     """Add sample documents to the database"""
+    # We need to add documents directly to the database instead of using the tool
+    # since the tool is not callable directly
+    logger.info("Adding sample documents to database...")
+    
     sample_documents = [
         {
             "title": "Climate Change Impact Report",
@@ -1083,16 +904,41 @@ async def add_sample_documents(mcp_server: DocumentAnalyzerMCP):
         }
     ]
     
-    logger.info("Adding sample documents to database...")
-    
     for doc_data in sample_documents:
         try:
-            await mcp_server.handle_add_document({"document_data": doc_data})
-            logger.info(f"Added document: {doc_data['title']}")
+            # Generate document ID
+            document_id = hashlib.sha256(
+                f"{doc_data['title']}{doc_data['content']}{datetime.now().isoformat()}".encode()
+            ).hexdigest()[:16]
+            
+            # Create metadata
+            metadata = DocumentMetadata(
+                title=doc_data["title"],
+                author=doc_data.get("author"),
+                tags=doc_data.get("tags", []),
+                category=doc_data.get("category"),
+                created_date=datetime.now(),
+                modified_date=datetime.now()
+            )
+            
+            # Add document to database
+            success = db.add_document(document_id, doc_data["title"], doc_data["content"], metadata)
+            
+            if success:
+                logger.info(f"Added document: {doc_data['title']}")
+            else:
+                logger.error(f"Failed to add document: {doc_data['title']}")
         except Exception as e:
             logger.error(f"Error adding document {doc_data['title']}: {str(e)}")
     
     logger.info("Sample documents added successfully!")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Initialize components
+    initialize_components()
+    
+    # Add sample documents
+    asyncio.run(add_sample_documents())
+    
+    # Run the FastMCP server
+    app.run()
