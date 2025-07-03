@@ -1,5 +1,5 @@
 # MCP and OpenAI
-mcp>=1.0.0
+mcp==1.10.1
 openai>=1.0.0
 
 # NLP Libraries

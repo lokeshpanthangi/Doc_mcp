@@ -31,9 +31,7 @@ from sklearn.decomposition import LatentDirichletAllocation
 import numpy as np
 
 # MCP imports
-from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.server.stdio import stdio_server
+from mcp.server.fastmcp import FastMCP
 from mcp.types import (
     Resource,
     Tool,
