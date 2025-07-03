@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mcp-document-analyzer
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements_api.txt && python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('vader_lexicon'); nltk.download('averaged_perceptron_tagger'); nltk.download('maxent_ne_chunker'); nltk.download('words')"
+    startCommand: gunicorn api_server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_PATH
+        value: ./documents.db
+      - key: NLTK_DATA_PATH
+        value: ./nltk_data
+      - key: FLASK_ENV
+        value: production
