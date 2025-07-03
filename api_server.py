@@ -27,10 +27,8 @@ class SecureDocumentAnalyzer:
         # Initialize database (shared across all users)
         self.db = DocumentDatabase()
         
-        # Create analyzer instance with user's client
-        self.analyzer = DocumentAnalyzer()
-        # Override the analyzer's OpenAI client with user's
-        self.analyzer.client = self.client
+        # Create analyzer instance with user's API key
+        self.analyzer = DocumentAnalyzer(user_api_key)
     
     def analyze_text(self, content, title="Untitled"):
         """Analyze text content"""
