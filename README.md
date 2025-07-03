@@ -368,10 +368,6 @@ print(result.keywords)
 3. Add tests for new functionality
 4. Submit pull request
 
-## License
-
-MIT License - see LICENSE file for details
-
 ## Support
 
 For issues and questions:
